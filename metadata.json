@@ -1,0 +1,6 @@
+{
+  "name": "Studio",
+  "description": "Mobile-first minimalist digital audio workstation featuring multi-track mixing, piano roll, 16 drum pads, vocal auto-tune and FX chain, offline wav export, and low-RAM optimization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
