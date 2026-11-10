@@ -15,8 +15,10 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.ui.components.StatusShower
 import com.example.ui.screens.AutoTuneScreen
 import com.example.ui.screens.ExportScreen
 import com.example.ui.screens.HomeScreen
@@ -45,6 +47,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun StudioApp(viewModel: StudioViewModel = viewModel()) {
     val currentScreen by viewModel.currentScreen.collectAsState()
+    val statusNotification by viewModel.statusNotification.collectAsState()
 
     // Handle Android system back button on sub-screens
     BackHandler(enabled = currentScreen != StudioScreen.HOME) {
@@ -76,5 +79,12 @@ fun StudioApp(viewModel: StudioViewModel = viewModel()) {
                 StudioScreen.OFFLINE_GUIDE -> OfflineGuideScreen(viewModel)
             }
         }
+
+        // Live Error Shower & Action Feedback Banner
+        StatusShower(
+            notification = statusNotification,
+            onDismiss = { viewModel.dismissNotification() },
+            modifier = Modifier.align(Alignment.TopCenter)
+        )
     }
 }

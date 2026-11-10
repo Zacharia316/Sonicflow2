@@ -190,7 +190,10 @@ fun PianoRollScreen(viewModel: StudioViewModel) {
                                     .height(keyHeightDp)
                                     .background(if (isBlack) Color(0xFF423447) else Color.White)
                                     .border(0.3.dp, Color(0xFFE4D5E8))
-                                    .clickable { viewModel.audioPlayer.playPianoNote(midi) },
+                                    .clickable {
+                                        viewModel.audioPlayer.playPianoNote(midi)
+                                        viewModel.postStatus("Key: ${StudioViewModel.midiToNoteName(midi)}")
+                                    },
                                 contentAlignment = Alignment.CenterEnd
                             ) {
                                 if (midi % 12 == 0) { // C notes

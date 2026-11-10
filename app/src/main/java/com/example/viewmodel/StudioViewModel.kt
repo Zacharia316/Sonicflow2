@@ -43,11 +43,22 @@ data class PianoRollNote(
     val velocity: Float = 0.85f
 )
 
+data class StatusNotification(
+    val id: Long = System.currentTimeMillis(),
+    val message: String,
+    val isError: Boolean = false
+)
+
 class StudioViewModel(application: Application) : AndroidViewModel(application) {
 
     private val db = StudioDatabase.getInstance(application)
-    val audioPlayer = AudioPlayer()
+    val audioPlayer = AudioPlayer(application)
     val audioRecorder = AudioRecorder(application)
+
+    // Central status & error shower
+    private val _statusNotification = MutableStateFlow<StatusNotification?>(null)
+    val statusNotification: StateFlow<StatusNotification?> = _statusNotification.asStateFlow()
+    private var notificationJob: Job? = null
 
     // Navigation state
     private val _currentScreen = MutableStateFlow(StudioScreen.HOME)
@@ -86,7 +97,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
 
-    private val _playbackProgress = MutableStateFlow(0.14f) // e.g. 00:12 / 01:24
+    private val _playbackProgress = MutableStateFlow(0.14f)
     val playbackProgress: StateFlow<Float> = _playbackProgress.asStateFlow()
 
     private val _currentStep = MutableStateFlow(4)
@@ -110,8 +121,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     private val _isMonitorOn = MutableStateFlow(true)
     val isMonitorOn: StateFlow<Boolean> = _isMonitorOn.asStateFlow()
 
-    // Meter animation loop
-    private var meterJob: Job? = null
+    // Meter animation values
     val beatMeter = MutableStateFlow(0.65f)
     val vocalMeter = MutableStateFlow(0.55f)
     val adlibMeter = MutableStateFlow(0.40f)
@@ -153,33 +163,39 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     val instDelay = MutableStateFlow(0.20f)
     val instAttack = MutableStateFlow(0.15f)
 
-    // Vocal FX chain states (Image 5 & 8)
+    // Vocal FX chain states
     val vocalFxPreset = MutableStateFlow("Clean")
     val autoTuneEnabled = MutableStateFlow(true)
     val autoTuneKey = MutableStateFlow("C Major")
-    val autoTuneAmount = MutableStateFlow(48f) // 48%
+    val autoTuneAmount = MutableStateFlow(48f)
     val vocalReverbEnabled = MutableStateFlow(true)
-    val vocalReverbAmount = MutableStateFlow(32f) // 32%
+    val vocalReverbAmount = MutableStateFlow(32f)
     val vocalDelayEnabled = MutableStateFlow(true)
-    val vocalDelayAmount = MutableStateFlow(24f) // 24%
+    val vocalDelayAmount = MutableStateFlow(24f)
     val compressorEnabled = MutableStateFlow(true)
     val deEsserEnabled = MutableStateFlow(true)
-    val retuneSpeed = MutableStateFlow(45f) // 45%
-    val humanize = MutableStateFlow(22f)   // 22%
+    val retuneSpeed = MutableStateFlow(45f)
+    val humanize = MutableStateFlow(22f)
     val flexTune = MutableStateFlow(true)
     val voicePreset = MutableStateFlow("R&B")
     val isBypassed = MutableStateFlow(false)
-    val livePitchCent = MutableStateFlow(12f) // -50c to +50c live monitor
+    val livePitchCent = MutableStateFlow(12f)
 
-    // Export State (Image 7)
+    // Export State
     val exportFormat = MutableStateFlow(AudioExporter.ExportFormat.MP3)
     val exportQuality = MutableStateFlow(AudioExporter.AudioQuality.PRO_STUDIO)
     val exportProgress = MutableStateFlow(0)
     val isExporting = MutableStateFlow(false)
     val exportedFile = MutableStateFlow<File?>(null)
 
-    // Live pitch simulation loop for UI needle
     init {
+        // Wire audio engine callbacks to notification shower
+        audioPlayer.onError = { err -> postStatus(err, isError = true) }
+        audioPlayer.onStatus = { msg -> postStatus(msg, isError = false) }
+        audioRecorder.onError = { err -> postStatus(err, isError = true) }
+        audioRecorder.onStatus = { msg -> postStatus(msg, isError = false) }
+
+        // Live pitch simulation loop for UI needle
         viewModelScope.launch {
             while (isActive) {
                 if (_currentScreen.value == StudioScreen.AUTO_TUNE) {
@@ -191,10 +207,27 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun postStatus(message: String, isError: Boolean = false) {
+        notificationJob?.cancel()
+        _statusNotification.value = StatusNotification(message = message, isError = isError)
+        notificationJob = viewModelScope.launch {
+            delay(3500)
+            if (_statusNotification.value?.message == message) {
+                _statusNotification.value = null
+            }
+        }
+    }
+
+    fun dismissNotification() {
+        notificationJob?.cancel()
+        _statusNotification.value = null
+    }
+
     fun navigateTo(screen: StudioScreen) {
         if (_currentScreen.value != screen) {
             screenBackStack.add(_currentScreen.value)
             _currentScreen.value = screen
+            postStatus("Opened ${screen.name.replace('_', ' ')}")
         }
     }
 
@@ -209,14 +242,17 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     fun selectProject(project: ProjectEntity) {
         _activeProject.value = project
         _bpm.value = project.bpm
+        postStatus("Loaded Project: ${project.title}")
         navigateTo(StudioScreen.MIXER)
     }
 
     fun togglePlay() {
         if (_isPlaying.value) {
             stopPlayback()
+            postStatus("Playback Stopped")
         } else {
             startPlayback()
+            postStatus("Playing: ${_activeProject.value.title} (${_bpm.value} BPM)")
         }
     }
 
@@ -229,7 +265,6 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 _currentStep.value = step
                 _playbackProgress.value = progress
 
-                // Animate meter spikes to the beat
                 beatMeter.value = (0.5f + Random.nextFloat() * 0.45f) * _activeProject.value.beatVolume
                 vocalMeter.value = (0.4f + Random.nextFloat() * 0.40f) * _activeProject.value.vocalVolume
                 adlibMeter.value = (0.2f + Random.nextFloat() * 0.40f) * _activeProject.value.adlibVolume
@@ -252,26 +287,32 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
     fun toggleMetronome() {
         _isMetronomeOn.value = !_isMetronomeOn.value
+        postStatus(if (_isMetronomeOn.value) "Metronome Enabled" else "Metronome Disabled")
     }
 
     fun toggleLoop() {
         _isLoopOn.value = !_isLoopOn.value
+        postStatus(if (_isLoopOn.value) "Loop Enabled" else "Loop Disabled")
     }
 
     fun toggleMonitor() {
         _isMonitorOn.value = !_isMonitorOn.value
+        postStatus(if (_isMonitorOn.value) "Monitor Enabled" else "Monitor Disabled")
     }
 
     fun setBpm(newBpm: Int) {
         _bpm.value = newBpm.coerceIn(40, 240)
+        postStatus("Tempo: ${_bpm.value} BPM")
     }
 
     fun setQuantize(q: String) {
         _quantize.value = q
+        postStatus("Quantize: $q")
     }
 
     fun setVelocity(v: Int) {
         _velocity.value = v.coerceIn(1, 127)
+        postStatus("Velocity: $v")
     }
 
     // Mixer adjustments
@@ -312,6 +353,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         val existing = _pianoNotes.value.find { it.midiNote == midiNote && it.startStep == step }
         if (existing != null) {
             _pianoNotes.value = _pianoNotes.value - existing
+            postStatus("Removed note at beat ${step / 4 + 1}")
         } else {
             val newNote = PianoRollNote(
                 midiNote = midiNote,
@@ -321,25 +363,31 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             )
             _pianoNotes.value = _pianoNotes.value + newNote
             audioPlayer.playPianoNote(midiNote, _velocity.value / 127f)
+            postStatus("Added note: ${midiToNoteName(midiNote)} at beat ${step / 4 + 1}")
         }
     }
 
     fun undoLastNote() {
         if (_pianoNotes.value.isNotEmpty()) {
             _pianoNotes.value = _pianoNotes.value.dropLast(1)
+            postStatus("Undid last note")
+        } else {
+            postStatus("No notes to undo")
         }
     }
 
     // Drum Pad Trigger
     fun triggerPad(type: DrumType) {
         audioPlayer.playDrum(type, 1.0f)
+        postStatus("Triggered: ${type.displayName}")
     }
 
-    // Export Action (Image 7)
+    // Export Action
     fun startExport(context: Context) {
         if (isExporting.value) return
         isExporting.value = true
         exportProgress.value = 0
+        postStatus("Rendering mix (${exportFormat.value.title})...")
 
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -353,8 +401,9 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 )
                 exportedFile.value = file
+                postStatus("Export Complete: ${file.name} (${file.length() / 1024} KB)")
             } catch (e: Exception) {
-                e.printStackTrace()
+                postStatus("Export failed: ${e.message}", isError = true)
             } finally {
                 isExporting.value = false
             }
@@ -365,5 +414,14 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         super.onCleared()
         audioPlayer.release()
         audioRecorder.stopRecording()
+    }
+
+    companion object {
+        fun midiToNoteName(midi: Int): String {
+            val notes = arrayOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+            val note = notes[midi % 12]
+            val octave = (midi / 12) - 1
+            return "$note$octave"
+        }
     }
 }

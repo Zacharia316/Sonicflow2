@@ -200,10 +200,23 @@ fun InstrumentsScreen(viewModel: StudioViewModel) {
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(18.dp),
                         onClick = {
-                            if (inst.name.contains("Piano")) {
-                                viewModel.navigateTo(StudioScreen.PIANO_ROLL)
-                            } else {
-                                viewModel.triggerPad(DrumType.KICK)
+                            when {
+                                inst.name.contains("Piano") -> {
+                                    viewModel.audioPlayer.playPianoNote(60)
+                                    viewModel.navigateTo(StudioScreen.PIANO_ROLL)
+                                }
+                                inst.name.contains("808") -> {
+                                    viewModel.audioPlayer.play808(36)
+                                    viewModel.postStatus("Sound: 808 Sub Bass")
+                                }
+                                inst.name.contains("Synth") -> {
+                                    viewModel.audioPlayer.playSynthPad(60)
+                                    viewModel.postStatus("Sound: Synth Pad C4")
+                                }
+                                else -> {
+                                    viewModel.audioPlayer.playDrum(DrumType.CONGA_HIGH)
+                                    viewModel.postStatus("Sound: Afro Conga")
+                                }
                             }
                         }
                     ) {

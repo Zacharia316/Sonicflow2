@@ -91,6 +91,7 @@ fun RecordingSessionScreen(viewModel: StudioViewModel) {
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
+            viewModel.postStatus("Microphone permission granted! Starting recording...")
             viewModel.audioRecorder.startRecording(
                 onCountDown = { countInNumber = it },
                 onFinishedCountDown = {
@@ -98,6 +99,8 @@ fun RecordingSessionScreen(viewModel: StudioViewModel) {
                     viewModel.startPlayback()
                 }
             )
+        } else {
+            viewModel.postStatus("Microphone permission denied. Enable microphone access in Settings.", isError = true)
         }
     }
 
@@ -333,6 +336,7 @@ fun RecordingSessionScreen(viewModel: StudioViewModel) {
                                         }
                                     )
                                 } else {
+                                    viewModel.postStatus("Microphone permission required to record. Please allow in dialog.")
                                     permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                 }
                             }
