@@ -1,7 +1,9 @@
 package com.example
 
+import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -11,12 +13,14 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ui.components.StatusShower
 import com.example.ui.screens.AutoTuneScreen
@@ -35,7 +39,17 @@ import com.example.viewmodel.StudioViewModel
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // Enable edge-to-edge with transparent status bar and dark icons for readability
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.light(
+                Color.TRANSPARENT,
+                Color.TRANSPARENT
+            ),
+            navigationBarStyle = SystemBarStyle.light(
+                Color.TRANSPARENT,
+                Color.TRANSPARENT
+            )
+        )
         setContent {
             MyApplicationTheme {
                 StudioApp()
@@ -57,9 +71,7 @@ fun StudioApp(viewModel: StudioViewModel = viewModel()) {
     }
 
     Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .safeDrawingPadding()
+        modifier = Modifier.fillMaxSize()
     ) {
         AnimatedContent(
             targetState = currentScreen,
@@ -80,11 +92,14 @@ fun StudioApp(viewModel: StudioViewModel = viewModel()) {
             }
         }
 
-        // Live Error Shower & Action Feedback Banner
+        // Live Error Shower & Action Feedback Banner positioned cleanly below status bar
         StatusShower(
             notification = statusNotification,
             onDismiss = { viewModel.dismissNotification() },
-            modifier = Modifier.align(Alignment.TopCenter)
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 10.dp)
         )
     }
 }

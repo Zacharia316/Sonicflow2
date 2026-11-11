@@ -69,28 +69,23 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     // Projects list from Room database
     val projects = db.projectDao().getAllProjects()
 
-    // Active project state
-    private val _activeProject = MutableStateFlow(
-        ProjectEntity(
-            id = "p_midnight",
-            title = "Midnight Drive",
-            subtitle = "Final Mix",
-            bpm = 140,
-            keySignature = "C Major",
-            durationSeconds = 154,
-            durationFormatted = "2:34",
-            lastEditedDisplay = "Edited 12m ago",
-            beatVolume = 0.85f,  // -3.2dB
-            vocalVolume = 0.80f, // -5.1dB
-            adlibVolume = 0.65f, // -8.0dB
-            harmonyVolume = 0.72f,// -6.4dB
-            beatPan = -0.12f,
-            vocalPan = 0.06f,
-            adlibPan = 0.00f,
-            harmonyPan = 0.03f,
-            lyrics = "driving late, city lights fade\nwaiting for the sunrise on the highway"
-        )
+    // Default template used when no projects exist yet
+    private val defaultProjectTemplate = ProjectEntity(
+        id = "proj_default",
+        title = "New Project",
+        subtitle = "Draft",
+        bpm = 120,
+        keySignature = "C Major",
+        durationSeconds = 60,
+        durationFormatted = "1:00",
+        lastEditedDisplay = "Just now",
+        lastEditedTimestamp = System.currentTimeMillis(),
+        category = "All",
+        lyrics = ""
     )
+
+    // Active project state
+    private val _activeProject = MutableStateFlow(defaultProjectTemplate)
     val activeProject: StateFlow<ProjectEntity> = _activeProject.asStateFlow()
 
     // Transport playback state
@@ -195,6 +190,31 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         audioRecorder.onError = { err -> postStatus(err, isError = true) }
         audioRecorder.onStatus = { msg -> postStatus(msg, isError = false) }
 
+        // Purge any legacy placeholder dummy projects from earlier runs
+        viewModelScope.launch(Dispatchers.IO) {
+            val dummyIds = listOf("p_continue", "p_summer", "p_vocal", "p_chill", "p_ambient", "p_drums", "p_midnight")
+            db.projectDao().deleteByIds(dummyIds)
+        }
+
+        // Keep active project aligned with real projects from Room
+        viewModelScope.launch {
+            projects.collect { list ->
+                if (list.isNotEmpty()) {
+                    val currentId = _activeProject.value.id
+                    if (currentId == "proj_default" || list.none { it.id == currentId }) {
+                        _activeProject.value = list.first()
+                        _bpm.value = list.first().bpm
+                    } else {
+                        list.find { it.id == currentId }?.let { updated ->
+                            _activeProject.value = updated
+                        }
+                    }
+                } else {
+                    _activeProject.value = defaultProjectTemplate
+                }
+            }
+        }
+
         // Live pitch simulation loop for UI needle
         viewModelScope.launch {
             while (isActive) {
@@ -239,10 +259,69 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         return false
     }
 
+    fun createProject(title: String, bpm: Int = 120, category: String = "All") {
+        val cleanTitle = title.trim().ifEmpty { "Project ${(100..999).random()}" }
+        val now = System.currentTimeMillis()
+        val newProj = ProjectEntity(
+            id = "p_${now}_${(1000..9999).random()}",
+            title = cleanTitle,
+            subtitle = "Draft",
+            bpm = bpm.coerceIn(40, 240),
+            keySignature = "C Major",
+            durationSeconds = 60,
+            durationFormatted = "1:00",
+            lastEditedDisplay = "Just now",
+            lastEditedTimestamp = now,
+            category = category,
+            lyrics = ""
+        )
+        viewModelScope.launch(Dispatchers.IO) {
+            db.projectDao().insertProject(newProj)
+            _activeProject.value = newProj
+            _bpm.value = newProj.bpm
+            postStatus("Created \"${newProj.title}\"")
+        }
+    }
+
+    fun renameProject(project: ProjectEntity, newTitle: String) {
+        val clean = newTitle.trim()
+        if (clean.isEmpty()) return
+        val now = System.currentTimeMillis()
+        viewModelScope.launch(Dispatchers.IO) {
+            db.projectDao().renameProject(project.id, clean, now, "Just now")
+            if (_activeProject.value.id == project.id) {
+                _activeProject.value = _activeProject.value.copy(
+                    title = clean,
+                    lastEditedTimestamp = now,
+                    lastEditedDisplay = "Just now"
+                )
+            }
+            postStatus("Renamed to \"$clean\"")
+        }
+    }
+
+    fun deleteProject(project: ProjectEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            db.projectDao().deleteById(project.id)
+            if (_activeProject.value.id == project.id) {
+                _activeProject.value = defaultProjectTemplate
+            }
+            postStatus("Deleted \"${project.title}\"")
+        }
+    }
+
     fun selectProject(project: ProjectEntity) {
-        _activeProject.value = project
+        val now = System.currentTimeMillis()
+        val touched = project.copy(
+            lastEditedTimestamp = now,
+            lastEditedDisplay = "Just now"
+        )
+        _activeProject.value = touched
         _bpm.value = project.bpm
-        postStatus("Loaded Project: ${project.title}")
+        viewModelScope.launch(Dispatchers.IO) {
+            db.projectDao().updateProject(touched)
+        }
+        postStatus("Loaded: ${project.title}")
         navigateTo(StudioScreen.MIXER)
     }
 

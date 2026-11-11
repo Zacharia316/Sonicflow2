@@ -27,4 +27,13 @@ interface ProjectDao {
 
     @Delete
     suspend fun deleteProject(project: ProjectEntity)
+
+    @Query("DELETE FROM projects WHERE id = :id")
+    suspend fun deleteById(id: String)
+
+    @Query("DELETE FROM projects WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<String>)
+
+    @Query("UPDATE projects SET title = :newTitle, lastEditedTimestamp = :now, lastEditedDisplay = :display WHERE id = :id")
+    suspend fun renameProject(id: String, newTitle: String, now: Long, display: String)
 }
