@@ -84,6 +84,7 @@ fun StudioApp(viewModel: StudioViewModel = viewModel()) {
                 StudioScreen.MIXER -> MixerScreen(viewModel)
                 StudioScreen.PIANO_ROLL -> PianoRollScreen(viewModel)
                 StudioScreen.INSTRUMENTS -> InstrumentsScreen(viewModel)
+                StudioScreen.DRUM_PADS -> com.example.ui.screens.DrumPadsScreen(viewModel)
                 StudioScreen.RECORDING_SESSION -> RecordingSessionScreen(viewModel)
                 StudioScreen.VOCAL_FX -> VocalFxScreen(viewModel)
                 StudioScreen.AUTO_TUNE -> AutoTuneScreen(viewModel)

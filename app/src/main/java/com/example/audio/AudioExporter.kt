@@ -4,19 +4,21 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.content.FileProvider
 import com.example.data.ProjectEntity
+import com.example.data.StudioTrack
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import kotlin.math.sin
 
 /**
- * Handles professional audio rendering and export for Studio DAW.
- * Generates true 16-bit or 24-bit stereo RIFF WAV files offline.
+ * Handles audio rendering and export for Studio DAW.
+ * Exports real multitrack recordings and imported audio to a RIFF WAV file offline.
+ * Contains no programmatic sound generation or synthetic beats.
  */
 object AudioExporter {
 
@@ -33,7 +35,8 @@ object AudioExporter {
     }
 
     /**
-     * Renders project tracks and exports to a valid .wav file in the app storage.
+     * Renders real project audio clips to a valid .wav file in app storage.
+     * If no clips exist, exports silence without crashing or generating fake sounds.
      */
     suspend fun renderAndExport(
         context: Context,
@@ -59,42 +62,78 @@ object AudioExporter {
         fos.write(dummyHeader)
 
         val bufferSize = 4096
-        val shortBuffer = ShortArray(bufferSize * channels)
         val byteBuffer = ByteBuffer.allocate(bufferSize * channels * 2).order(ByteOrder.LITTLE_ENDIAN)
 
+        // Parse real project tracks and clips
+        val tracks = StudioTrack.listFromJson(project.notesData)
+        val activeClips = mutableListOf<Pair<com.example.data.AudioClip, Float>>()
+        val hasSolo = tracks.any { it.isSoloed }
+        for (track in tracks) {
+            val isAudible = if (hasSolo) track.isSoloed else !track.isMuted
+            if (isAudible) {
+                for (clip in track.clips) {
+                    val file = File(clip.filePath)
+                    if (file.exists() && file.length() > 44L) {
+                        activeClips.add(Pair(clip, track.volume))
+                    }
+                }
+            }
+        }
+
         var samplesWritten = 0
-        val bpm = project.bpm
-        val beatFreq = bpm / 60.0
-        val twoPi = 2.0 * Math.PI
 
         while (samplesWritten < totalSamples) {
             val chunk = minOf(bufferSize, totalSamples - samplesWritten)
             byteBuffer.clear()
 
+            val leftSamples = FloatArray(chunk)
+            val rightSamples = FloatArray(chunk)
+
+            // Mix real audio clips if present at the current playback position
+            val chunkStartSec = samplesWritten.toFloat() / sampleRate
+            val chunkEndSec = (samplesWritten + chunk).toFloat() / sampleRate
+
+            for ((clip, trackVol) in activeClips) {
+                val clipStart = clip.startOffsetSeconds
+                val clipEnd = clip.startOffsetSeconds + clip.durationSeconds
+                if (chunkEndSec > clipStart && chunkStartSec < clipEnd) {
+                    try {
+                        val file = File(clip.filePath)
+                        val fis = FileInputStream(file)
+                        // Skip WAV header
+                        fis.skip(44L)
+
+                        val clipSampleOffset = ((chunkStartSec - clipStart) * sampleRate).toInt()
+                        if (clipSampleOffset > 0) {
+                            fis.skip(clipSampleOffset.toLong() * 2)
+                        }
+
+                        val readBuf = ByteArray(chunk * 2)
+                        val bytesRead = fis.read(readBuf)
+                        fis.close()
+
+                        if (bytesRead > 0) {
+                            val shortsRead = bytesRead / 2
+                            for (s in 0 until shortsRead) {
+                                val outIdx = if (clipSampleOffset < 0) -clipSampleOffset + s else s
+                                if (outIdx in 0 until chunk) {
+                                    val low = readBuf[s * 2].toInt() and 0xFF
+                                    val high = readBuf[s * 2 + 1].toInt()
+                                    val sampleVal = ((high shl 8) or low).toShort().toFloat() / Short.MAX_VALUE
+                                    leftSamples[outIdx] += sampleVal * trackVol
+                                    rightSamples[outIdx] += sampleVal * trackVol
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+
             for (i in 0 until chunk) {
-                val t = (samplesWritten + i).toDouble() / sampleRate
-                val beatProgress = (t * beatFreq) % 1.0
-
-                // Generate rich musical beat mix
-                val kickEnv = Math.exp(-beatProgress * 12.0)
-                val kick = if (beatProgress < 0.3) sin(twoPi * 55.0 * (1.0 + 1.5 * (1.0 - beatProgress / 0.3)) * t) * kickEnv else 0.0
-
-                // Hi-hat tick every 8th
-                val hatProgress = (t * beatFreq * 2.0) % 1.0
-                val hat = if (hatProgress < 0.08) (Math.random() * 2.0 - 1.0) * Math.exp(-hatProgress * 30.0) * 0.25 else 0.0
-
-                // Ambient chord pad
-                val chord = (sin(twoPi * 220.0 * t) + sin(twoPi * 277.18 * t) + sin(twoPi * 329.63 * t)) * 0.12
-
-                // Vocal lead melody simulation
-                val vocalMelody = sin(twoPi * 440.0 * t) * 0.18 * (0.8 + 0.2 * sin(twoPi * 4.5 * t))
-
-                // Mix with user track volume & pan settings
-                val left = (kick * 0.9 + hat * 0.8 + chord * 0.7 + vocalMelody * 0.85 * (1.0 - project.vocalPan.toDouble())).coerceIn(-1.0, 1.0)
-                val right = (kick * 0.9 + hat * 0.8 + chord * 0.7 + vocalMelody * 0.85 * (1.0 + project.vocalPan.toDouble())).coerceIn(-1.0, 1.0)
-
-                byteBuffer.putShort((left * Short.MAX_VALUE * 0.8).toInt().toShort())
-                byteBuffer.putShort((right * Short.MAX_VALUE * 0.8).toInt().toShort())
+                val l = leftSamples[i].coerceIn(-1.0f, 1.0f)
+                val r = rightSamples[i].coerceIn(-1.0f, 1.0f)
+                byteBuffer.putShort((l * Short.MAX_VALUE).toInt().toShort())
+                byteBuffer.putShort((r * Short.MAX_VALUE).toInt().toShort())
             }
 
             fos.write(byteBuffer.array(), 0, chunk * channels * 2)
@@ -102,7 +141,7 @@ object AudioExporter {
 
             val percent = ((samplesWritten.toDouble() / totalSamples) * 100).toInt()
             onProgress(percent)
-            delay(15) // Smooth visual progress bar
+            delay(5)
         }
 
         fos.flush()

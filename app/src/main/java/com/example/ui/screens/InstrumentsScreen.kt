@@ -202,20 +202,16 @@ fun InstrumentsScreen(viewModel: StudioViewModel) {
                         onClick = {
                             when {
                                 inst.name.contains("Piano") -> {
-                                    viewModel.audioPlayer.playPianoNote(60)
                                     viewModel.navigateTo(StudioScreen.PIANO_ROLL)
                                 }
                                 inst.name.contains("808") -> {
-                                    viewModel.audioPlayer.play808(36)
-                                    viewModel.postStatus("Sound: 808 Sub Bass")
+                                    viewModel.postStatus("Selected: 808 Sub Bass")
                                 }
                                 inst.name.contains("Synth") -> {
-                                    viewModel.audioPlayer.playSynthPad(60)
-                                    viewModel.postStatus("Sound: Synth Pad C4")
+                                    viewModel.postStatus("Selected: Synth Pad")
                                 }
                                 else -> {
-                                    viewModel.audioPlayer.playDrum(DrumType.CONGA_HIGH)
-                                    viewModel.postStatus("Sound: Afro Conga")
+                                    viewModel.postStatus("Selected: Afro Conga")
                                 }
                             }
                         }
@@ -310,50 +306,58 @@ fun InstrumentsScreen(viewModel: StudioViewModel) {
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // 4x4 Neumorphic Drum Pad Grid (Image 2)
-            Text(
-                text = "DRUM PAD",
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 0.8.sp,
-                color = StudioTextSecondary,
-                modifier = Modifier.align(Alignment.CenterHorizontally)
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(4),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.fillMaxWidth().weight(1f)
+            // Dedicated Drum Pads Banner Card
+            StudioCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { viewModel.navigateTo(StudioScreen.DRUM_PADS) },
+                shape = RoundedCornerShape(18.dp)
             ) {
-                items(drumPadsList.size) { index ->
-                    val drumType = drumPadsList[index]
-                    val isPressed = activePadIndex == index
-                    val padBg = if (isPressed) Color(0xFFC7B1D0) else Color(0xF2FFFFFF)
-
-                    Box(
-                        modifier = Modifier
-                            .aspectRatio(1.2f)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(padBg)
-                            .clickable {
-                                activePadIndex = index
-                                triggerVibration()
-                                viewModel.triggerPad(drumType)
-                            },
-                        contentAlignment = Alignment.Center
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(StudioPrimary),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.GraphicEq,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(
-                                text = drumType.displayName,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (isPressed) Color.White else StudioTextPrimary
+                                text = "16-Pad MPC Drum Machine",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = StudioTextPrimary
+                            )
+                            Text(
+                                text = "Open full-screen beat pads with haptics & knobs",
+                                fontSize = 11.sp,
+                                color = StudioTextSecondary
                             )
                         }
                     }
+
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = "Open Drum Pads",
+                        tint = StudioPrimary,
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
             }
         }

@@ -1,10 +1,9 @@
 package com.example
 
-import com.example.audio.AudioSynthesizer
-import com.example.audio.DrumType
+import com.example.audio.AudioPlayer
+import com.example.audio.AudioUtils
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ExampleUnitTest {
@@ -15,30 +14,27 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun testAudioSynthesizer_pianoNoteGeneration() {
-        val noteBuffer = AudioSynthesizer.generatePianoNote(60, durationSeconds = 0.5f)
-        assertNotNull(noteBuffer)
-        assertTrue(noteBuffer.isNotEmpty())
-        assertEquals((AudioSynthesizer.SAMPLE_RATE * 0.5f).toInt(), noteBuffer.size)
+    fun testPcmToWavHeader() {
+        val pcm = ShortArray(100) { (it * 10).toShort() }
+        val wavBytes = AudioPlayer.pcmToWav(pcm, 44100)
+        assertNotNull(wavBytes)
+        // 44-byte RIFF/WAVE header + 200 bytes PCM = 244 bytes
+        assertEquals(244, wavBytes.size)
+        assertEquals('R'.code.toByte(), wavBytes[0])
+        assertEquals('I'.code.toByte(), wavBytes[1])
+        assertEquals('F'.code.toByte(), wavBytes[2])
+        assertEquals('F'.code.toByte(), wavBytes[3])
+        assertEquals('W'.code.toByte(), wavBytes[8])
+        assertEquals('A'.code.toByte(), wavBytes[9])
+        assertEquals('V'.code.toByte(), wavBytes[10])
+        assertEquals('E'.code.toByte(), wavBytes[11])
     }
 
     @Test
-    fun testAudioSynthesizer_drumHitsGeneration() {
-        for (drum in DrumType.values()) {
-            val buf = AudioSynthesizer.generateDrum(drum)
-            assertNotNull(buf)
-            assertTrue("Drum ${drum.name} should generate valid PCM audio", buf.isNotEmpty())
-        }
-    }
-
-    @Test
-    fun testMidiNoteToFreq() {
-        // A4 = 440Hz
-        val freqA4 = AudioSynthesizer.midiNoteToFreq(69)
-        assertEquals(440.0f, freqA4, 0.5f)
-
-        // C4 = ~261.63Hz
-        val freqC4 = AudioSynthesizer.midiNoteToFreq(60)
-        assertEquals(261.63f, freqC4, 0.5f)
+    fun testTimecodeFormatting() {
+        assertEquals("00:00.00", AudioUtils.formatTimecode(0f))
+        assertEquals("01:15.50", AudioUtils.formatTimecode(75.5f))
+        assertEquals("0:05", AudioUtils.formatRulerTime(5))
+        assertEquals("1:00", AudioUtils.formatRulerTime(60))
     }
 }

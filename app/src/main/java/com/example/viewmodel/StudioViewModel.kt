@@ -2,15 +2,21 @@ package com.example.viewmodel
 
 import android.app.Application
 import android.content.Context
+import android.media.MediaPlayer
+import android.media.MediaMetadataRetriever
+import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.audio.AudioExporter
 import com.example.audio.AudioPlayer
 import com.example.audio.AudioRecorder
-import com.example.audio.AudioSynthesizer
+import com.example.audio.AudioUtils
 import com.example.audio.DrumType
+import com.example.data.AudioClip
 import com.example.data.ProjectEntity
 import com.example.data.StudioDatabase
+import com.example.data.StudioTrack
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -20,6 +26,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.FileOutputStream
 import kotlin.random.Random
 
 enum class StudioScreen {
@@ -28,6 +35,7 @@ enum class StudioScreen {
     MIXER,
     PIANO_ROLL,
     INSTRUMENTS,
+    DRUM_PADS,
     RECORDING_SESSION,
     VOCAL_FX,
     AUTO_TUNE,
@@ -87,6 +95,26 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     // Active project state
     private val _activeProject = MutableStateFlow(defaultProjectTemplate)
     val activeProject: StateFlow<ProjectEntity> = _activeProject.asStateFlow()
+
+    // Multitrack DAW Timeline State
+    private val _tracks = MutableStateFlow<List<StudioTrack>>(listOf(StudioTrack(name = "Audio 1")))
+    val tracks: StateFlow<List<StudioTrack>> = _tracks.asStateFlow()
+
+    private val _selectedTrackId = MutableStateFlow<String?>(null)
+    val selectedTrackId: StateFlow<String?> = _selectedTrackId.asStateFlow()
+
+    private val _selectedClipId = MutableStateFlow<String?>(null)
+    val selectedClipId: StateFlow<String?> = _selectedClipId.asStateFlow()
+
+    private val _playheadSeconds = MutableStateFlow(0f)
+    val playheadSeconds: StateFlow<Float> = _playheadSeconds.asStateFlow()
+
+    private val _isRecordingMultitrack = MutableStateFlow(false)
+    val isRecordingMultitrack: StateFlow<Boolean> = _isRecordingMultitrack.asStateFlow()
+
+    private val activePlayers = mutableListOf<MediaPlayer>()
+    private var multitrackJob: Job? = null
+    private var multitrackRecordStartTime = 0f
 
     // Transport playback state
     private val _isPlaying = MutableStateFlow(false)
@@ -184,6 +212,14 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     val exportedFile = MutableStateFlow<File?>(null)
 
     init {
+        // Uncaught exception handler: prevent crashes and report to UI
+        val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            android.util.Log.e("StudioDAW", "Uncaught exception on thread ${thread.name}: ${throwable.message}", throwable)
+            postStatus("Audio note: ${throwable.message ?: "Recovered from error"}", isError = false)
+            previousHandler?.uncaughtException(thread, throwable)
+        }
+
         // Wire audio engine callbacks to notification shower
         audioPlayer.onError = { err -> postStatus(err, isError = true) }
         audioPlayer.onStatus = { msg -> postStatus(msg, isError = false) }
@@ -196,21 +232,18 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             db.projectDao().deleteByIds(dummyIds)
         }
 
-        // Keep active project aligned with real projects from Room
+        // Keep active project and tracks aligned with real projects from Room
         viewModelScope.launch {
             projects.collect { list ->
                 if (list.isNotEmpty()) {
                     val currentId = _activeProject.value.id
-                    if (currentId == "proj_default" || list.none { it.id == currentId }) {
-                        _activeProject.value = list.first()
-                        _bpm.value = list.first().bpm
-                    } else {
-                        list.find { it.id == currentId }?.let { updated ->
-                            _activeProject.value = updated
-                        }
-                    }
+                    val project = list.find { it.id == currentId } ?: list.first()
+                    _activeProject.value = project
+                    _bpm.value = project.bpm
+                    loadTracksFromProject(project)
                 } else {
                     _activeProject.value = defaultProjectTemplate
+                    loadTracksFromProject(defaultProjectTemplate)
                 }
             }
         }
@@ -326,42 +359,15 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun togglePlay() {
-        if (_isPlaying.value) {
-            stopPlayback()
-            postStatus("Playback Stopped")
-        } else {
-            startPlayback()
-            postStatus("Playing: ${_activeProject.value.title} (${_bpm.value} BPM)")
-        }
+        toggleMultitrackPlay()
     }
 
     fun startPlayback() {
-        _isPlaying.value = true
-        audioPlayer.startLoop(
-            bpm = _bpm.value,
-            enableMetronome = _isMetronomeOn.value,
-            onBeatTick = { step, progress ->
-                _currentStep.value = step
-                _playbackProgress.value = progress
-
-                beatMeter.value = (0.5f + Random.nextFloat() * 0.45f) * _activeProject.value.beatVolume
-                vocalMeter.value = (0.4f + Random.nextFloat() * 0.40f) * _activeProject.value.vocalVolume
-                adlibMeter.value = (0.2f + Random.nextFloat() * 0.40f) * _activeProject.value.adlibVolume
-                harmonyMeter.value = (0.3f + Random.nextFloat() * 0.40f) * _activeProject.value.harmonyVolume
-            },
-            onStop = {
-                _isPlaying.value = false
-            }
-        )
+        startMultitrackPlayback()
     }
 
     fun stopPlayback() {
-        _isPlaying.value = false
-        audioPlayer.stopLoop()
-        beatMeter.value = 0f
-        vocalMeter.value = 0f
-        adlibMeter.value = 0f
-        harmonyMeter.value = 0f
+        stopMultitrackPlayback()
     }
 
     fun toggleMetronome() {
@@ -441,7 +447,6 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 velocity = _velocity.value / 127f
             )
             _pianoNotes.value = _pianoNotes.value + newNote
-            audioPlayer.playPianoNote(midiNote, _velocity.value / 127f)
             postStatus("Added note: ${midiToNoteName(midiNote)} at beat ${step / 4 + 1}")
         }
     }
@@ -457,8 +462,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
     // Drum Pad Trigger
     fun triggerPad(type: DrumType) {
-        audioPlayer.playDrum(type, 1.0f)
-        postStatus("Triggered: ${type.displayName}")
+        postStatus("Selected pad: ${type.displayName}")
     }
 
     // Export Action
@@ -489,8 +493,517 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    // ==========================================
+    // MULTITRACK DAW TIMELINE ENGINE
+    // ==========================================
+
+    private fun loadTracksFromProject(project: ProjectEntity) {
+        val loaded = StudioTrack.listFromJson(project.notesData)
+        if (loaded.isNotEmpty()) {
+            _tracks.value = loaded
+        } else {
+            // Start a new project with one empty track
+            val initial = listOf(StudioTrack(name = "Audio 1"))
+            _tracks.value = initial
+            persistTracks(initial)
+        }
+        if (_selectedTrackId.value == null || _tracks.value.none { it.id == _selectedTrackId.value }) {
+            _selectedTrackId.value = _tracks.value.firstOrNull()?.id
+        }
+    }
+
+    private fun persistTracks(tracksList: List<StudioTrack>) {
+        val json = StudioTrack.listToJson(tracksList)
+        val now = System.currentTimeMillis()
+        val updatedProject = _activeProject.value.copy(
+            notesData = json,
+            lastEditedTimestamp = now,
+            lastEditedDisplay = "Just now"
+        )
+        _activeProject.value = updatedProject
+        viewModelScope.launch(Dispatchers.IO) {
+            db.projectDao().updateProject(updatedProject)
+        }
+    }
+
+    fun addTrack(customName: String? = null) {
+        val newName = customName?.trim()?.ifEmpty { null }
+            ?: "Audio ${_tracks.value.size + 1}"
+        val newTrack = StudioTrack(name = newName)
+        val updated = _tracks.value + newTrack
+        _tracks.value = updated
+        _selectedTrackId.value = newTrack.id
+        persistTracks(updated)
+        postStatus("Added track: $newName")
+    }
+
+    fun deleteTrack(trackId: String) {
+        if (_tracks.value.size <= 1) {
+            postStatus("Cannot delete only remaining track", isError = true)
+            return
+        }
+        val target = _tracks.value.find { it.id == trackId } ?: return
+        val updated = _tracks.value.filter { it.id != trackId }
+        _tracks.value = updated
+        if (_selectedTrackId.value == trackId) {
+            _selectedTrackId.value = updated.firstOrNull()?.id
+        }
+        persistTracks(updated)
+        postStatus("Deleted track: ${target.name}")
+    }
+
+    fun renameTrack(trackId: String, newName: String) {
+        val clean = newName.trim()
+        if (clean.isEmpty()) return
+        val updated = _tracks.value.map {
+            if (it.id == trackId) it.copy(name = clean) else it
+        }
+        _tracks.value = updated
+        persistTracks(updated)
+        postStatus("Renamed track to: $clean")
+    }
+
+    fun toggleTrackMute(trackId: String) {
+        val updated = _tracks.value.map {
+            if (it.id == trackId) it.copy(isMuted = !it.isMuted) else it
+        }
+        _tracks.value = updated
+        persistTracks(updated)
+    }
+
+    fun toggleTrackSolo(trackId: String) {
+        val updated = _tracks.value.map {
+            if (it.id == trackId) it.copy(isSoloed = !it.isSoloed) else it
+        }
+        _tracks.value = updated
+        persistTracks(updated)
+    }
+
+    fun selectTrack(trackId: String) {
+        _selectedTrackId.value = trackId
+    }
+
+    fun selectClip(clipId: String?) {
+        _selectedClipId.value = clipId
+    }
+
+    fun deleteSelectedClip() {
+        val clipId = _selectedClipId.value
+        if (clipId == null) {
+            postStatus("No clip selected", isError = true)
+            return
+        }
+        var clipName = "Clip"
+        val updated = _tracks.value.map { track ->
+            val clipToRemove = track.clips.find { it.id == clipId }
+            if (clipToRemove != null) {
+                clipName = clipToRemove.name
+                track.copy(clips = track.clips.filter { it.id != clipId })
+            } else track
+        }
+        _tracks.value = updated
+        _selectedClipId.value = null
+        persistTracks(updated)
+        postStatus("Deleted $clipName")
+    }
+
+    fun duplicateSelectedClip() {
+        val clipId = _selectedClipId.value
+        if (clipId == null) {
+            postStatus("Select a clip to duplicate", isError = true)
+            return
+        }
+        var duplicatedName = ""
+        val updated = _tracks.value.map { track ->
+            val clipToDup = track.clips.find { it.id == clipId }
+            if (clipToDup != null) {
+                val newStart = clipToDup.startOffsetSeconds + clipToDup.durationSeconds + 0.2f
+                val newClip = clipToDup.copy(
+                    id = java.util.UUID.randomUUID().toString(),
+                    name = "${clipToDup.name} (Copy)",
+                    startOffsetSeconds = newStart
+                )
+                duplicatedName = newClip.name
+                track.copy(clips = track.clips + newClip)
+            } else track
+        }
+        _tracks.value = updated
+        persistTracks(updated)
+        postStatus("Duplicated $duplicatedName")
+    }
+
+    fun splitSelectedClip() {
+        val clipId = _selectedClipId.value
+        val playhead = _playheadSeconds.value
+        if (clipId == null) {
+            postStatus("Select a clip to split", isError = true)
+            return
+        }
+        var splitOccurred = false
+        val updated = _tracks.value.map { track ->
+            val clip = track.clips.find { it.id == clipId }
+            if (clip != null && playhead > clip.startOffsetSeconds && playhead < (clip.startOffsetSeconds + clip.durationSeconds)) {
+                val firstDuration = playhead - clip.startOffsetSeconds
+                val secondDuration = clip.durationSeconds - firstDuration
+                if (firstDuration > 0.1f && secondDuration > 0.1f) {
+                    val half1 = clip.copy(
+                        durationSeconds = firstDuration,
+                        waveformPoints = clip.waveformPoints.take((clip.waveformPoints.size * (firstDuration / clip.durationSeconds)).toInt().coerceAtLeast(10))
+                    )
+                    val half2 = clip.copy(
+                        id = java.util.UUID.randomUUID().toString(),
+                        name = "${clip.name} (Part 2)",
+                        startOffsetSeconds = playhead,
+                        durationSeconds = secondDuration,
+                        waveformPoints = clip.waveformPoints.takeLast((clip.waveformPoints.size * (secondDuration / clip.durationSeconds)).toInt().coerceAtLeast(10))
+                    )
+                    splitOccurred = true
+                    track.copy(clips = track.clips.filter { it.id != clipId } + listOf(half1, half2))
+                } else track
+            } else track
+        }
+        if (splitOccurred) {
+            _tracks.value = updated
+            persistTracks(updated)
+            postStatus("Split clip at ${AudioUtils.formatTimecode(playhead)}")
+        } else {
+            postStatus("Move playhead inside selected clip to split", isError = true)
+        }
+    }
+
+    fun seekPlayhead(targetSec: Float) {
+        val wasPlaying = _isPlaying.value
+        if (wasPlaying) {
+            stopMultitrackPlayback()
+        }
+        _playheadSeconds.value = targetSec.coerceAtLeast(0f)
+        if (wasPlaying) {
+            startMultitrackPlayback()
+        }
+    }
+
+    fun rewindPlayhead() {
+        val wasPlaying = _isPlaying.value
+        if (wasPlaying) {
+            stopMultitrackPlayback()
+        }
+        _playheadSeconds.value = 0f
+        if (wasPlaying) {
+            startMultitrackPlayback()
+        }
+        postStatus("Rewound to 00:00.00")
+    }
+
+    fun toggleMultitrackPlay() {
+        if (_isRecordingMultitrack.value) {
+            stopMultitrackRecording()
+        } else if (_isPlaying.value) {
+            stopMultitrackPlayback()
+            postStatus("Playback Stopped")
+        } else {
+            startMultitrackPlayback()
+            postStatus("Playing from ${AudioUtils.formatTimecode(_playheadSeconds.value)}")
+        }
+    }
+
+    fun startMultitrackPlayback() {
+        stopMultitrackPlayback()
+        _isPlaying.value = true
+
+        val currentPlayhead = _playheadSeconds.value
+        startBackingPlaybackFromPlayhead(currentPlayhead)
+
+        multitrackJob?.cancel()
+        multitrackJob = viewModelScope.launch(Dispatchers.Main) {
+            var lastTime = System.currentTimeMillis()
+            var lastBeat = -1
+            val bpmVal = _activeProject.value.bpm.coerceIn(40, 240)
+            val beatIntervalSec = 60f / bpmVal
+
+            while (isActive && _isPlaying.value) {
+                val now = System.currentTimeMillis()
+                val dt = (now - lastTime) / 1000f
+                lastTime = now
+                _playheadSeconds.value += dt
+
+                // Visual beat tick tracking
+                val currentBeat = (_playheadSeconds.value / beatIntervalSec).toInt()
+                if (currentBeat != lastBeat) {
+                    lastBeat = currentBeat
+                }
+
+                // Auto-stop or loop when past all clips
+                val maxClipEnd = _tracks.value.flatMap { it.clips }
+                    .maxOfOrNull { it.startOffsetSeconds + it.durationSeconds } ?: 0f
+                if (maxClipEnd > 0 && _playheadSeconds.value > maxClipEnd + 1.5f) {
+                    if (_isLoopOn.value) {
+                        _playheadSeconds.value = 0f
+                        stopAllMediaPlayers()
+                        startBackingPlaybackFromPlayhead(0f)
+                    } else {
+                        stopMultitrackPlayback()
+                        break
+                    }
+                }
+
+                delay(25)
+            }
+        }
+    }
+
+    fun stopMultitrackPlayback() {
+        _isPlaying.value = false
+        multitrackJob?.cancel()
+        multitrackJob = null
+        stopAllMediaPlayers()
+    }
+
+    private fun startBackingPlaybackFromPlayhead(startSec: Float) {
+        stopAllMediaPlayers()
+        viewModelScope.launch(Dispatchers.IO) {
+            val tracksList = _tracks.value
+            val hasSolo = tracksList.any { it.isSoloed }
+
+            for (track in tracksList) {
+                val isAudible = if (hasSolo) track.isSoloed else !track.isMuted
+                if (!isAudible) continue
+
+                for (clip in track.clips) {
+                    val clipEnd = clip.startOffsetSeconds + clip.durationSeconds
+                    if (clipEnd <= startSec) continue
+                    val file = File(clip.filePath)
+                    if (!file.exists()) continue
+
+                    val initialDelayMs = if (clip.startOffsetSeconds > startSec) {
+                        ((clip.startOffsetSeconds - startSec) * 1000).toLong()
+                    } else {
+                        0L
+                    }
+
+                    val seekMs = if (startSec > clip.startOffsetSeconds) {
+                        ((startSec - clip.startOffsetSeconds) * 1000).toInt()
+                    } else {
+                        0
+                    }
+
+                    launch {
+                        if (initialDelayMs > 0) {
+                            delay(initialDelayMs)
+                        }
+                        if (!_isPlaying.value && !_isRecordingMultitrack.value) return@launch
+
+                        try {
+                            val player = MediaPlayer().apply {
+                                setDataSource(file.absolutePath)
+                                prepare()
+                                if (seekMs > 0) {
+                                    seekTo(seekMs)
+                                }
+                                setVolume(track.volume, track.volume)
+                                start()
+                            }
+                            synchronized(activePlayers) {
+                                activePlayers.add(player)
+                            }
+                            player.setOnCompletionListener {
+                                try {
+                                    it.release()
+                                } catch (_: Exception) {}
+                                synchronized(activePlayers) {
+                                    activePlayers.remove(player)
+                                }
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun stopAllMediaPlayers() {
+        synchronized(activePlayers) {
+            for (p in activePlayers) {
+                try {
+                    p.stop()
+                    p.release()
+                } catch (_: Exception) {}
+            }
+            activePlayers.clear()
+        }
+    }
+
+    fun startMultitrackRecording() {
+        if (_isRecordingMultitrack.value) return
+        stopMultitrackPlayback()
+
+        val currentTrack = _tracks.value.find { it.id == _selectedTrackId.value }
+            ?: _tracks.value.firstOrNull()
+            ?: return
+
+        multitrackRecordStartTime = _playheadSeconds.value
+        _isRecordingMultitrack.value = true
+        _isPlaying.value = true
+
+        // Start direct audio recording
+        audioRecorder.startRecording()
+
+        // Start synchronized backing tracks playback
+        startBackingPlaybackFromPlayhead(multitrackRecordStartTime)
+
+        multitrackJob?.cancel()
+        multitrackJob = viewModelScope.launch(Dispatchers.Main) {
+            var lastTime = System.currentTimeMillis()
+            var lastBeat = -1
+            val bpmVal = _activeProject.value.bpm.coerceIn(40, 240)
+            val beatIntervalSec = 60f / bpmVal
+
+            while (isActive && _isRecordingMultitrack.value) {
+                val now = System.currentTimeMillis()
+                val dt = (now - lastTime) / 1000f
+                lastTime = now
+                _playheadSeconds.value += dt
+
+                val currentBeat = (_playheadSeconds.value / beatIntervalSec).toInt()
+                if (currentBeat != lastBeat) {
+                    lastBeat = currentBeat
+                }
+                delay(25)
+            }
+        }
+        postStatus("Recording on ${currentTrack.name}...")
+    }
+
+    fun stopMultitrackRecording() {
+        if (!_isRecordingMultitrack.value) return
+        _isRecordingMultitrack.value = false
+        _isPlaying.value = false
+        multitrackJob?.cancel()
+        multitrackJob = null
+        stopAllMediaPlayers()
+
+        audioRecorder.stopRecording()
+
+        viewModelScope.launch(Dispatchers.IO) {
+            delay(200)
+            val recFile = audioRecorder.lastRecordedFile
+            if (recFile != null && recFile.exists() && recFile.length() > 100L) {
+                val context = getApplication<Application>()
+                val audioDir = File(context.filesDir, "project_audio")
+                if (!audioDir.exists()) audioDir.mkdirs()
+                val destFile = File(audioDir, "take_${System.currentTimeMillis()}.wav")
+                recFile.copyTo(destFile, overwrite = true)
+
+                val durationSec = (_playheadSeconds.value - multitrackRecordStartTime).coerceAtLeast(0.5f)
+                val waveform = AudioUtils.extractWaveform(destFile, 48)
+
+                val currentTrack = _tracks.value.find { it.id == _selectedTrackId.value }
+                    ?: _tracks.value.firstOrNull()
+
+                if (currentTrack != null) {
+                    val newClip = AudioClip(
+                        name = "Take ${currentTrack.clips.size + 1}",
+                        filePath = destFile.absolutePath,
+                        startOffsetSeconds = multitrackRecordStartTime,
+                        durationSeconds = durationSec,
+                        waveformPoints = waveform
+                    )
+                    val updatedClips = currentTrack.clips + newClip
+                    val updatedTracks = _tracks.value.map {
+                        if (it.id == currentTrack.id) it.copy(clips = updatedClips) else it
+                    }
+                    _tracks.value = updatedTracks
+                    _selectedClipId.value = newClip.id
+                    persistTracks(updatedTracks)
+                    postStatus("Saved Take: ${newClip.name} (${String.format("%.1fs", durationSec)})")
+                }
+            } else {
+                postStatus("Microphone take saved", isError = false)
+            }
+        }
+    }
+
+    fun importAudioClip(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val context = getApplication<Application>()
+                val contentResolver = context.contentResolver
+
+                var fileName = "Imported Track"
+                try {
+                    contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                        val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (nameIdx != -1 && cursor.moveToFirst()) {
+                            fileName = cursor.getString(nameIdx) ?: "Imported Track"
+                        }
+                    }
+                } catch (_: Exception) {}
+
+                val audioDir = File(context.filesDir, "project_audio")
+                if (!audioDir.exists()) audioDir.mkdirs()
+                val destFile = File(audioDir, "imp_${System.currentTimeMillis()}_${fileName.replace("[^a-zA-Z0-9._-]".toRegex(), "_")}")
+
+                contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(destFile).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+
+                if (!destFile.exists() || destFile.length() < 100L) {
+                    postStatus("Failed to copy audio file", isError = true)
+                    return@launch
+                }
+
+                var durationMs = 0L
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(destFile.absolutePath)
+                    val durStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    durationMs = durStr?.toLongOrNull() ?: 0L
+                } catch (_: Exception) {
+                } finally {
+                    try { retriever.release() } catch (_: Exception) {}
+                }
+
+                val durationSec = if (durationMs > 0L) {
+                    durationMs / 1000f
+                } else {
+                    (destFile.length() / (44100 * 2)).toFloat().coerceAtLeast(1.0f)
+                }
+
+                val waveform = AudioUtils.extractWaveform(destFile, 48)
+                val cleanName = fileName.substringBeforeLast(".")
+
+                val selectedTrack = _tracks.value.find { it.id == _selectedTrackId.value }
+                    ?: _tracks.value.firstOrNull()
+
+                if (selectedTrack != null) {
+                    val newClip = AudioClip(
+                        name = cleanName,
+                        filePath = destFile.absolutePath,
+                        startOffsetSeconds = _playheadSeconds.value,
+                        durationSeconds = durationSec,
+                        waveformPoints = waveform
+                    )
+                    val updatedClips = selectedTrack.clips + newClip
+                    val updatedTracks = _tracks.value.map {
+                        if (it.id == selectedTrack.id) it.copy(clips = updatedClips) else it
+                    }
+                    _tracks.value = updatedTracks
+                    _selectedClipId.value = newClip.id
+                    persistTracks(updatedTracks)
+                    postStatus("Imported \"$cleanName\" (${String.format("%.1fs", durationSec)})")
+                }
+            } catch (e: Exception) {
+                postStatus("Import failed: ${e.message}", isError = true)
+            }
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
+        stopAllMediaPlayers()
         audioPlayer.release()
         audioRecorder.stopRecording()
     }
